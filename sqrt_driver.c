@@ -148,11 +148,12 @@ static irqreturn_t sqrt0_isr(int irq,void*dev_id)
 {
 
   printk(KERN_INFO "\n\nSqrt0 interapt se desio\n\n");
-  finished++;
+  
   if(output_count < input_count){
     
     u32 led_val;
     led_val = ioread32(sqrtip0->base_addr+Y_offset);
+    finished++;
     spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
     output_print[sqrt0_ord] = (int)led_val;
     input_print[sqrt0_ord] = (int)input_numbers[sqrt0_ord];
@@ -169,11 +170,12 @@ static irqreturn_t sqrt0_isr(int irq,void*dev_id)
 static irqreturn_t sqrt1_isr(int irq,void*dev_id)
 {
   printk(KERN_INFO "\n\nSqrt1 interapt se desio\n\n");
-  finished++;
+  
   if(output_count < input_count){
     
     u32 led_val;
     led_val = ioread32(sqrtip1->base_addr+Y_offset);
+    finished++;
     spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
 
     output_print[sqrt1_ord] = (int)led_val;
@@ -191,11 +193,12 @@ static irqreturn_t sqrt1_isr(int irq,void*dev_id)
 static irqreturn_t sqrt2_isr(int irq,void*dev_id)
 {
   printk(KERN_INFO "\n\nSqrt2 interapt se desio\n\n");
-  finished++;
+  
   if(output_count < input_count){
     
     u32 led_val;
     led_val = ioread32(sqrtip2->base_addr+Y_offset);
+    finished++;
     spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
 
     output_print[sqrt2_ord] = (int)led_val;
@@ -213,11 +216,12 @@ static irqreturn_t sqrt2_isr(int irq,void*dev_id)
 static irqreturn_t sqrt3_isr(int irq,void*dev_id)
 {
   printk(KERN_INFO "\n\nSqrt3 interapt se desio\n\n");
-  finished++;
+  
   if(output_count < input_count){
     
     u32 led_val;
     led_val = ioread32(sqrtip3->base_addr+Y_offset);
+    finished++;
     spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
 
     output_print[sqrt3_ord] = (int)led_val;
