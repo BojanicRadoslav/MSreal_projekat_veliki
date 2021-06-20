@@ -567,19 +567,54 @@ ssize_t led_read(struct file *pfile, char __user *buffer, size_t length, loff_t 
 {
 	int ret;
 	int len = 0;
-	u32 led_val = 0;
+	u32 in = 0;
+  u32 out = 0;
 	int i = 0;
 	char buff[BUFF_SIZE];
+  char output[BUFF_SIZE];
 	if (endRead){
 		endRead = 0;
 		return 0;
 	}
 
+  sprintf(buff, "");
+
+  if(input_count >= 1){
+
+    in = ioread32(sqrtip0->base_addr+X_offset);
+    out = ioread32(sqrtip0->base_addr+Y_offset);
+    sprintf(output, "%d:%d,", in,out);
+    strcat(buff, output);
+
+    if(input_count >= 2)
+    {
+      in = ioread32(sqrtip1->base_addr+X_offset);
+      out = ioread32(sqrtip1->base_addr+Y_offset);
+      sprintf(output, "%d:%d,", in,out);
+      strcat(buff, output);
+      if(input_count >= 3)
+      {
+        in = ioread32(sqrtip2->base_addr+X_offset);
+        out = ioread32(sqrtip2->base_addr+Y_offset);
+        sprintf(output, "%d:%d,", in,out);
+        strcat(buff, output);
+
+        if(input_count >= 4)
+        {
+          in = ioread32(sqrtip3->base_addr+X_offset);
+          out = ioread32(sqrtip3->base_addr+Y_offset);
+          sprintf(output, "%d:%d,", in,out);
+          strcat(buff, output);
+        }
+      }
+    }
+  }
+
 
 	//buffer: 0b????
 	//index:  012345
-  sprintf(buff, "finished: %d\n", finished);
-	len=15;
+  //sprintf(buff, "finished: %d\n", finished);
+	len=strlen(buff);
 	ret = copy_to_user(buffer, buff, len);
 	if(ret)
 		return -EFAULT;
@@ -632,7 +667,9 @@ ssize_t led_write(struct file *pfile, const char __user *buffer, size_t length, 
     printk(KERN_INFO "Uneto %ld\n", led_val);
 
 }else{
-
+    input_count = 0;
+    output_count = 0;
+    finished = 0;
     char* const delim = ",";
     //char str[] = "some/split/string";
     char *token, *cur = buff;
