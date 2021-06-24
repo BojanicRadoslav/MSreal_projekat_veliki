@@ -1,10 +1,14 @@
 /*
-LED radi lepo, trebalo bi da valja za sva 3 metoda unosa
-Sintaksa je echo led (broj) > /dev/sqrt
-Unos brojeva radi, mozda se unese 100 brojeva ako ne premase buffer od 500
-Unos radi, pretvara brojeve u int i smesta u long int niz input_numbers
-input_counter broji koliko ih ima
-Sad treba stavljati u registre sqrt ip korova i odraditi interrupt kada zavrse da se stave novi
+Format unosenja brojeva je echo 1,2,3,4 > /dev/sqrt &, mora & obavezno inace zabode terminal
+Ako ima vise od 4 broja, 4 se stave u IP jezgra a ostali cekaju da se ovi iscitaju
+Kada se obradjeni iscitaju u IP jezgra sledeca 4 broja ili 3,2,1 zavisi koliko ih je ostalo
+Ledovke na plocici umesto da pokazuju koje jezgro je zauzeto pokazuju koliko brojeva jos treba da se iscita, nije moglo drugacije
+Primer kako treba da se koristi drajver:
+echo 1,2,3,4,5 > /dev/sqrt &, pale se 4 led diode
+cat /dev/sqrt
+1:1,2:1,3:1,4:2, pali se 1 led dioda
+cat /dev/sqrt
+5:2, sve led diode ugasene
 */
 
 
@@ -27,8 +31,7 @@ Sad treba stavljati u registre sqrt ip korova i odraditi interrupt kada zavrse d
 #include <linux/of.h>//of match table
 #include <linux/ioport.h>//ioremap
 
-#include <linux/interrupt.h> //interrupt kada sqrt ip zavrsi sa racunanjem
-#include <linux/spinlock.h> //ako vise ip korova zavrse u isto vreme i pokusavaju da pisu u niz resenja
+#include <linux/wait.h>
 
 #define BUFF_SIZE 500 //nek se nadje
 #define DRIVER_NAME "sqrt"
@@ -41,88 +44,107 @@ Sad treba stavljati u registre sqrt ip korova i odraditi interrupt kada zavrse d
 
 MODULE_LICENSE("Dual BSD/GPL");
 
-struct led_info {
+struct sqrt_info {
   unsigned long mem_start;
   unsigned long mem_end;
   void __iomem *base_addr;
   int irq_num;
 };
 
+wait_queue_head_t queue;
+static int queue_flag = 0;
+
 dev_t my_dev_id;
-static spinlock_t lock = __SPIN_LOCK_UNLOCKED(lock);
 static struct class *my_class;
 static struct device *my_device;
 static struct cdev *my_cdev;
-static struct led_info *lp = NULL;
-static struct led_info *sqrtip0 = NULL;
-static struct led_info *sqrtip1 = NULL;
-static struct led_info *sqrtip2 = NULL;
-static struct led_info *sqrtip3 = NULL;
+static struct sqrt_info *lp = NULL;
+static struct sqrt_info *sqrtip0 = NULL;
+static struct sqrt_info *sqrtip1 = NULL;
+static struct sqrt_info *sqrtip2 = NULL;
+static struct sqrt_info *sqrtip3 = NULL;
 
 static int led = 0;
 static long int input_numbers[100];
-static long int input_print[100];
-static long int output_print[100];
 static int input_count = 0; //broji koliko je uneto
 static int output_count = 0; //broji koliko je izracunato
 int endRead = 0;
 
-static int sqrt0_ord;
-static int sqrt1_ord;
-static int sqrt2_ord;
-static int sqrt3_ord;
 static int finished = 0;
 
-static irqreturn_t sqrt0_isr(int irq,void*dev_id); //interapt rutina kada sqrt0 zavrsi racunanje
-static irqreturn_t sqrt1_isr(int irq,void*dev_id); //interapt rutina kada sqrt1 zavrsi racunanje
-static irqreturn_t sqrt2_isr(int irq,void*dev_id); //interapt rutina kada sqrt2 zavrsi racunanje
-static irqreturn_t sqrt3_isr(int irq,void*dev_id); //interapt rutina kada sqrt3 zavrsi racunanje
-static int led_probe(struct platform_device *pdev);
-static int led_remove(struct platform_device *pdev);
-int led_open(struct inode *pinode, struct file *pfile);
-int led_close(struct inode *pinode, struct file *pfile);
-ssize_t led_read(struct file *pfile, char __user *buffer, size_t length, loff_t *offset);
-ssize_t led_write(struct file *pfile, const char __user *buffer, size_t length, loff_t *offset);
-static int __init led_init(void);
-static void __exit led_exit(void);
+static int sqrt_probe(struct platform_device *pdev);
+static int sqrt_remove(struct platform_device *pdev);
+int sqrt_open(struct inode *pinode, struct file *pfile);
+int sqrt_close(struct inode *pinode, struct file *pfile);
+ssize_t sqrt_read(struct file *pfile, char __user *buffer, size_t length, loff_t *offset);
+ssize_t sqrt_write(struct file *pfile, const char __user *buffer, size_t length, loff_t *offset);
+static int __init sqrt_init(void);
+static void __exit sqrt_exit(void);
 
-static void sqrt0_write(int num)
+static void led_on(int sqrt)
 {
-      iowrite32((u32)num, sqrtip0->base_addr+X_offset);
-      iowrite32((u32)1, sqrtip0-> base_addr + start_offset);
-      iowrite32((u32)0, sqrtip0-> base_addr + start_offset);
+  u32 led;
+  switch(sqrt)
+  {
+    case 1:
+      led = 1;
+      break;
+    case 2:
+      led = 3;
+      break;
+    case 3:
+      led = 7;
+      break;
+    case 4:
+      led = 15;
+      break;
+    default:
+      led = 0;
+      break;
+
+  }
+  iowrite32((u32)led, lp->base_addr);
 }
 
-static void sqrt1_write(int num)
+static void sqrt_write_num(int num, int sqrt)
 {
-      iowrite32((u32)num, sqrtip1->base_addr+X_offset);
-      iowrite32((u32)1, sqrtip1-> base_addr + start_offset);
-      iowrite32((u32)0, sqrtip1-> base_addr + start_offset);
-}
+      if(sqrt == 0)
+      {
+        iowrite32((u32)num, sqrtip0->base_addr+X_offset);
+        iowrite32((u32)1, sqrtip0-> base_addr + start_offset);
+        iowrite32((u32)0, sqrtip0-> base_addr + start_offset);
+      }else if(sqrt == 1)
+      {
+        iowrite32((u32)num, sqrtip1->base_addr+X_offset);
+        iowrite32((u32)1, sqrtip1-> base_addr + start_offset);
+        iowrite32((u32)0, sqrtip1-> base_addr + start_offset);
 
-static void sqrt2_write(int num)
-{
-      iowrite32((u32)num, sqrtip2->base_addr+X_offset);
-      iowrite32((u32)1, sqrtip2-> base_addr + start_offset);
-      iowrite32((u32)0, sqrtip2-> base_addr + start_offset);
-}
+      }else if(sqrt == 2)
+      {
+        iowrite32((u32)num, sqrtip2->base_addr+X_offset);
+        iowrite32((u32)1, sqrtip2-> base_addr + start_offset);
+        iowrite32((u32)0, sqrtip2-> base_addr + start_offset);
 
-static void sqrt3_write(int num)
-{
-      iowrite32((u32)num, sqrtip3->base_addr+X_offset);
-      iowrite32((u32)1, sqrtip3-> base_addr + start_offset);
-      iowrite32((u32)0, sqrtip3-> base_addr + start_offset);
+      }else if(sqrt == 3)
+      {
+        iowrite32((u32)num, sqrtip3->base_addr+X_offset);
+        iowrite32((u32)1, sqrtip3-> base_addr + start_offset);
+        iowrite32((u32)0, sqrtip3-> base_addr + start_offset);
+      }
+
+      printk(KERN_INFO "Written to sqrt%d\n", sqrt);
+      
 }
 struct file_operations my_fops =
 {
 	.owner = THIS_MODULE,
-	.open = led_open,
-	.read = led_read,
-	.write = led_write,
-	.release = led_close,
+	.open = sqrt_open,
+	.read = sqrt_read,
+	.write = sqrt_write,
+	.release = sqrt_close,
 };
 
-static struct of_device_id led_of_match[] = {
+static struct of_device_id sqrt_of_match[] = {
   { .compatible = "led_gpio", },
   { .compatible = "xlnx,mysqrtip_0", },
   { .compatible = "xlnx,mysqrtip_1", },
@@ -131,113 +153,21 @@ static struct of_device_id led_of_match[] = {
   { /* end of list */ },
 };
 
-static struct platform_driver led_driver = {
+static struct platform_driver sqrt_driver = {
   .driver = {
     .name = DRIVER_NAME,
     .owner = THIS_MODULE,
-    .of_match_table	= led_of_match,
+    .of_match_table	= sqrt_of_match,
   },
-  .probe		= led_probe,
-  .remove		= led_remove,
+  .probe		= sqrt_probe,
+  .remove		= sqrt_remove,
 };
 
 
-MODULE_DEVICE_TABLE(of, led_of_match);
-
-static irqreturn_t sqrt0_isr(int irq,void*dev_id)
-{
-
-  printk(KERN_INFO "\n\nSqrt0 interapt se desio\n\n");
-  
-  if(output_count < input_count){
-    
-    u32 led_val;
-    led_val = ioread32(sqrtip0->base_addr+Y_offset);
-    finished++;
-    spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
-    output_print[sqrt0_ord] = (int)led_val;
-    input_print[sqrt0_ord] = (int)input_numbers[sqrt0_ord];
-
-    sqrt0_ord = output_count;
-    sqrt0_write(input_numbers[output_count]);
-    output_count++;
-    spin_unlock(&lock);
-}
-
-  return IRQ_HANDLED;
-}
-
-static irqreturn_t sqrt1_isr(int irq,void*dev_id)
-{
-  printk(KERN_INFO "\n\nSqrt1 interapt se desio\n\n");
-  
-  if(output_count < input_count){
-    
-    u32 led_val;
-    led_val = ioread32(sqrtip1->base_addr+Y_offset);
-    finished++;
-    spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
-
-    output_print[sqrt1_ord] = (int)led_val;
-    input_print[sqrt1_ord] = (int)input_numbers[sqrt1_ord];
-
-    sqrt1_ord = output_count;
-    sqrt1_write(input_numbers[output_count]);
-    output_count++;
-    spin_unlock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
-
-}
-  return IRQ_HANDLED;
-}
-
-static irqreturn_t sqrt2_isr(int irq,void*dev_id)
-{
-  printk(KERN_INFO "\n\nSqrt2 interapt se desio\n\n");
-  
-  if(output_count < input_count){
-    
-    u32 led_val;
-    led_val = ioread32(sqrtip2->base_addr+Y_offset);
-    finished++;
-    spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
-
-    output_print[sqrt2_ord] = (int)led_val;
-    input_print[sqrt2_ord] = (int)input_numbers[sqrt2_ord];
-
-    sqrt2_ord = output_count;
-    sqrt2_write(input_numbers[output_count]);
-    output_count++;
-    spin_unlock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
-
-}
-  return IRQ_HANDLED;
-}
-
-static irqreturn_t sqrt3_isr(int irq,void*dev_id)
-{
-  printk(KERN_INFO "\n\nSqrt3 interapt se desio\n\n");
-  
-  if(output_count < input_count){
-    
-    u32 led_val;
-    led_val = ioread32(sqrtip3->base_addr+Y_offset);
-    finished++;
-    spin_lock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
-
-    output_print[sqrt3_ord] = (int)led_val;
-    input_print[sqrt3_ord] = (int)input_numbers[sqrt3_ord];
-
-    sqrt3_ord = output_count;
-    sqrt3_write(input_numbers[output_count]);
-    output_count++;
-    spin_unlock(&lock); //output_print,input_print,output_count su deljeni resursi pa ih treba zakljucati da ne dodje do konflikta
+MODULE_DEVICE_TABLE(of, sqrt_of_match);
 
 
-}
-  return IRQ_HANDLED;
-}
-
-static int led_probe(struct platform_device *pdev)
+static int sqrt_probe(struct platform_device *pdev)
 {
   struct resource *r_mem;
   int rc = 0;
@@ -249,7 +179,7 @@ static int led_probe(struct platform_device *pdev)
     return -ENODEV;
   }
   if(counter == 1){
-   lp = (struct led_info *) kmalloc(sizeof(struct led_info), GFP_KERNEL);
+   lp = (struct sqrt_info *) kmalloc(sizeof(struct sqrt_info), GFP_KERNEL);
    if (!lp) {
      printk(KERN_ALERT "Could not allocate led device\n");
      return -ENOMEM;
@@ -273,7 +203,7 @@ static int led_probe(struct platform_device *pdev)
      goto error2;
    }
  }else if(counter == 2){
-   sqrtip0 = (struct led_info *) kmalloc(sizeof(struct led_info), GFP_KERNEL);
+   sqrtip0 = (struct sqrt_info *) kmalloc(sizeof(struct sqrt_info), GFP_KERNEL);
    if (!sqrtip0) {
      printk(KERN_ALERT "Could not allocate led device\n");
      return -ENOMEM;
@@ -305,18 +235,8 @@ static int led_probe(struct platform_device *pdev)
     goto error3;
   }
 
-  if (request_irq(sqrtip0->irq_num, sqrt0_isr, 0, DRIVER_NAME, NULL)) {
-    printk(KERN_ERR "xilaxitimer_probe: Cannot register IRQ %d\n", sqrtip0->irq_num);
-    rc = -EIO;
-    goto irq1;
-  
-  }
-  else {
-    //enable_irq(sqrtip0->irq_num);
-    printk(KERN_INFO "xilaxitimer_probe: Registered IRQ %d\n", sqrtip0->irq_num);
-  }
  }else if(counter == 3){
-   sqrtip1 = (struct led_info *) kmalloc(sizeof(struct led_info), GFP_KERNEL);
+   sqrtip1 = (struct sqrt_info *) kmalloc(sizeof(struct sqrt_info), GFP_KERNEL);
    if (!sqrtip1) {
      printk(KERN_ALERT "Could not allocate led device\n");
      return -ENOMEM;
@@ -347,18 +267,8 @@ static int led_probe(struct platform_device *pdev)
     goto error4;
   }
 
-  if (request_irq(sqrtip1->irq_num, sqrt1_isr, 0, DRIVER_NAME, NULL)) {
-    printk(KERN_ERR "xilaxitimer_probe: Cannot register IRQ %d\n", sqrtip1->irq_num);
-    rc = -EIO;
-    goto irq2;
-  
-  }
-  else {
-    //enable_irq(sqrtip0->irq_num);
-    printk(KERN_INFO "xilaxitimer_probe: Registered IRQ %d\n", sqrtip1->irq_num);
-  }
  }else if(counter == 4){
-   sqrtip2 = (struct led_info *) kmalloc(sizeof(struct led_info), GFP_KERNEL);
+   sqrtip2 = (struct sqrt_info *) kmalloc(sizeof(struct sqrt_info), GFP_KERNEL);
    if (!sqrtip2) {
      printk(KERN_ALERT "Could not allocate led device\n");
      return -ENOMEM;
@@ -389,18 +299,8 @@ static int led_probe(struct platform_device *pdev)
     goto error5;
   }
 
-  if (request_irq(sqrtip2->irq_num, sqrt2_isr, 0, DRIVER_NAME, NULL)) {
-    printk(KERN_ERR "xilaxitimer_probe: Cannot register IRQ %d\n", sqrtip2->irq_num);
-    rc = -EIO;
-    goto irq3;
-  
-  }
-  else {
-    //enable_irq(sqrtip0->irq_num);
-    printk(KERN_INFO "xilaxitimer_probe: Registered IRQ %d\n", sqrtip2->irq_num);
-  }
  }else if(counter == 5){
-   sqrtip3 = (struct led_info *) kmalloc(sizeof(struct led_info), GFP_KERNEL);
+   sqrtip3 = (struct sqrt_info *) kmalloc(sizeof(struct sqrt_info), GFP_KERNEL);
    if (!sqrtip3) {
      printk(KERN_ALERT "Could not allocate led device\n");
      return -ENOMEM;
@@ -431,34 +331,16 @@ static int led_probe(struct platform_device *pdev)
     goto error6;
   }
 
-  if (request_irq(sqrtip3->irq_num, sqrt3_isr, 0, DRIVER_NAME, NULL)) {
-    printk(KERN_ERR "xilaxitimer_probe: Cannot register IRQ %d\n", sqrtip3->irq_num);
-    rc = -EIO;
-    goto irq4;
-  
-  }
-  else {
-    //enable_irq(sqrtip0->irq_num);
-    printk(KERN_INFO "xilaxitimer_probe: Registered IRQ %d\n", sqrtip3->irq_num);
-  }
  }
 
   printk(KERN_WARNING "led platform driver registered\n");
   return 0;//ALL OK
-irq4:
-    iounmap(sqrtip3->base_addr);
 error6:
     release_mem_region(sqrtip3->mem_start, sqrtip3->mem_end - sqrtip3->mem_start + 1);
-irq3:
-    iounmap(sqrtip2->base_addr);
 error5:
     release_mem_region(sqrtip2->mem_start, sqrtip2->mem_end - sqrtip2->mem_start + 1);
-irq2:
-    iounmap(sqrtip1->base_addr);
 error4:
     release_mem_region(sqrtip1->mem_start, sqrtip1->mem_end - sqrtip1->mem_start + 1);
-irq1:
-    iounmap(sqrtip0->base_addr);
 error3:
     release_mem_region(sqrtip0->mem_start, sqrtip0->mem_end - sqrtip0->mem_start + 1);
 error2:
@@ -467,7 +349,7 @@ error1:
   return rc;
 }
 
-static int led_remove(struct platform_device *pdev)
+static int sqrt_remove(struct platform_device *pdev)
 {
 
   static int counter_remove = 0;
@@ -492,7 +374,6 @@ static int led_remove(struct platform_device *pdev)
     iowrite32(0, sqrtip0->base_addr+ready_offset);
     iounmap(sqrtip0->base_addr+ready_offset);
 
-    free_irq(sqrtip0->irq_num, NULL);
 
     release_mem_region(sqrtip0->mem_start, sqrtip0->mem_end - sqrtip0->mem_start + 1);
     kfree(sqrtip0);
@@ -509,7 +390,6 @@ static int led_remove(struct platform_device *pdev)
   iounmap(sqrtip1->base_addr+start_offset);
   iounmap(sqrtip1->base_addr+Y_offset);
   iounmap(sqrtip1->base_addr+ready_offset);
-  free_irq(sqrtip1->irq_num, NULL);
 
   release_mem_region(sqrtip1->mem_start, sqrtip1->mem_end - sqrtip1->mem_start + 1);
   kfree(sqrtip1);
@@ -524,7 +404,6 @@ static int led_remove(struct platform_device *pdev)
   iounmap(sqrtip2->base_addr+start_offset);
   iounmap(sqrtip2->base_addr+Y_offset);
   iounmap(sqrtip2->base_addr+ready_offset);
-  free_irq(sqrtip2->irq_num, NULL);
 
   release_mem_region(sqrtip2->mem_start, sqrtip2->mem_end - sqrtip2->mem_start + 1);
   kfree(sqrtip2);
@@ -539,7 +418,6 @@ static int led_remove(struct platform_device *pdev)
   iounmap(sqrtip3->base_addr+start_offset);
   iounmap(sqrtip3->base_addr+Y_offset);
   iounmap(sqrtip3->base_addr+ready_offset);
-  free_irq(sqrtip3->irq_num, NULL);
 
   release_mem_region(sqrtip3->mem_start, sqrtip3->mem_end - sqrtip3->mem_start + 1);
   kfree(sqrtip3);
@@ -551,25 +429,24 @@ static int led_remove(struct platform_device *pdev)
 
 
 
-int led_open(struct inode *pinode, struct file *pfile) 
+int sqrt_open(struct inode *pinode, struct file *pfile) 
 {
 		printk(KERN_INFO "Succesfully opened sqrt\n");
 		return 0;
 }
 
-int led_close(struct inode *pinode, struct file *pfile) 
+int sqrt_close(struct inode *pinode, struct file *pfile) 
 {
 		printk(KERN_INFO "Succesfully closed sqrt\n");
 		return 0;
 }
 
-ssize_t led_read(struct file *pfile, char __user *buffer, size_t length, loff_t *offset) 
+ssize_t sqrt_read(struct file *pfile, char __user *buffer, size_t length, loff_t *offset) 
 {
 	int ret;
 	int len = 0;
 	u32 in = 0;
   u32 out = 0;
-	int i = 0;
 	char buff[BUFF_SIZE];
   char output[BUFF_SIZE];
 	if (endRead){
@@ -579,27 +456,29 @@ ssize_t led_read(struct file *pfile, char __user *buffer, size_t length, loff_t 
 
   sprintf(buff, "");
 
-  if(input_count >= 1){
+  if(finished < 4) led_on(0);
+
+  if(finished >= 1){
 
     in = ioread32(sqrtip0->base_addr+X_offset);
     out = ioread32(sqrtip0->base_addr+Y_offset);
     sprintf(output, "%d:%d,", in,out);
     strcat(buff, output);
 
-    if(input_count >= 2)
+    if(finished >= 2)
     {
       in = ioread32(sqrtip1->base_addr+X_offset);
       out = ioread32(sqrtip1->base_addr+Y_offset);
       sprintf(output, "%d:%d,", in,out);
       strcat(buff, output);
-      if(input_count >= 3)
+      if(finished >= 3)
       {
         in = ioread32(sqrtip2->base_addr+X_offset);
         out = ioread32(sqrtip2->base_addr+Y_offset);
         sprintf(output, "%d:%d,", in,out);
         strcat(buff, output);
 
-        if(input_count >= 4)
+        if(finished >= 4)
         {
           in = ioread32(sqrtip3->base_addr+X_offset);
           out = ioread32(sqrtip3->base_addr+Y_offset);
@@ -609,11 +488,16 @@ ssize_t led_read(struct file *pfile, char __user *buffer, size_t length, loff_t 
       }
     }
   }
+  finished = 0;
+  queue_flag = 0;
+  wake_up_interruptible(&queue);
 
 
 	//buffer: 0b????
 	//index:  012345
   //sprintf(buff, "finished: %d\n", finished);
+  buff[strlen(buff)-1] = '\0';
+  strcat(buff, "\n");
 	len=strlen(buff);
 	ret = copy_to_user(buffer, buff, len);
 	if(ret)
@@ -624,12 +508,11 @@ ssize_t led_read(struct file *pfile, char __user *buffer, size_t length, loff_t 
 	return len;
 }
 
-ssize_t led_write(struct file *pfile, const char __user *buffer, size_t length, loff_t *offset) 
+ssize_t sqrt_write(struct file *pfile, const char __user *buffer, size_t length, loff_t *offset) 
 {
 	char buff[BUFF_SIZE];
 	int ret = 0;
-	long int led_val=0;
-  int i = 0; //treba mi za for ciklus dole
+	long int sqrt_val=0;
 
 	ret = copy_from_user(buff, buffer, length);
 	if(ret)
@@ -650,29 +533,31 @@ ssize_t led_write(struct file *pfile, const char __user *buffer, size_t length, 
   	// HEX  INPUT
   	if(buff[4] == '0' && (buff[5] == 'x' || buff[5] == 'X')) 
   	{
-  		ret = kstrtol(buff+6,16,&led_val);
+  		ret = kstrtol(buff+6,16,&sqrt_val);
       printk(KERN_INFO "Uneto bin\n");
   	}
   	// BINARY INPUT
   	else if(buff[4] == '0'  && (buff[5] == 'b' || buff[5] == 'B')) 
   	{
-  		ret = kstrtol(buff+6,2,&led_val);
+  		ret = kstrtol(buff+6,2,&sqrt_val);
   	}
   	// DECIMAL INPUT
   	else 
   	{
-  		ret = kstrtol(buff+4,10,&led_val);
+  		ret = kstrtol(buff+4,10,&sqrt_val);
   	}
 
-    printk(KERN_INFO "Uneto %ld\n", led_val);
+    printk(KERN_INFO "Uneto %ld\n", sqrt_val);
 
 }else{
     input_count = 0;
     output_count = 0;
     finished = 0;
     char* const delim = ",";
+    int n;
     //char str[] = "some/split/string";
     char *token, *cur = buff;
+    int i;
     while (token = strsep(&cur, delim)) {
       printk(KERN_INFO "%s\n", token);
       ret = kstrtol(token, 10, &input_numbers[input_count]);
@@ -680,46 +565,26 @@ ssize_t led_write(struct file *pfile, const char __user *buffer, size_t length, 
     }
     
     for(i=0;i<input_count;i++) printk(KERN_INFO "%d. = %ld\n", i, input_numbers[i]);
-      if(input_count >= 4){
-        sqrt0_ord = output_count;
-        sqrt0_write(input_numbers[output_count]);
-        output_count++;
+      
+      finished = 0;
+      queue_flag = 0;
+      while(output_count < input_count)
+      {
 
-        sqrt1_ord = output_count;
-        sqrt1_write(input_numbers[output_count]);
-        output_count++;
-
-        sqrt2_ord = output_count;
-        sqrt2_write(input_numbers[output_count]);
-        output_count++;
-
-        sqrt3_ord = output_count;
-        sqrt3_write(input_numbers[output_count]);
-        output_count++;
-      }else if(input_count == 3){
-        sqrt0_ord = output_count;
-        sqrt0_write(input_numbers[output_count]);
-        output_count++;
-
-        sqrt1_ord = output_count;
-        sqrt1_write(input_numbers[output_count]);
-        output_count++;
-
-        sqrt2_ord = output_count;
-        sqrt2_write(input_numbers[output_count]);
-        output_count++;
-      }else if(input_count == 2){
-        sqrt0_ord = output_count;
-        sqrt0_write(input_numbers[output_count]);
-        output_count++;
-
-        sqrt1_ord = output_count;
-        sqrt1_write(input_numbers[output_count]);
-        output_count++;
-      }else if(input_count == 1){
-        sqrt0_ord = output_count;
-        sqrt0_write(input_numbers[output_count]);
-        output_count++;
+        if(wait_event_interruptible(queue, (queue_flag == 0)))
+        {
+          return -ERESTARTSYS;
+        }
+        queue_flag = 1;
+        if(input_count-output_count > 4) n = 4;
+        else n = input_count-output_count;
+        for(i=0;i<n;i++)
+        {
+          sqrt_write_num(input_numbers[output_count], output_count%4);
+          output_count++;
+          finished++;
+        }
+        led_on(finished);
       }
 }
 
@@ -727,9 +592,9 @@ ssize_t led_write(struct file *pfile, const char __user *buffer, size_t length, 
     {
       if(led == 1)
       {
-        iowrite32((u32)led_val, lp->base_addr);
+        iowrite32((u32)sqrt_val, lp->base_addr);
       }
-      //printk(KERN_INFO "Succesfully wrote value %#x",(u32)led_val); 
+      //printk(KERN_INFO "Succesfully wrote value %#x",(u32)sqrt_val); 
     }
     else
     {
@@ -739,7 +604,7 @@ ssize_t led_write(struct file *pfile, const char __user *buffer, size_t length, 
 	return length;
 }
 
-static int __init led_init(void)
+static int __init sqrt_init(void)
 {
    int ret = 0;
 
@@ -750,7 +615,7 @@ static int __init led_init(void)
    }
    printk(KERN_INFO "char device region allocated\n");
 
-   my_class = class_create(THIS_MODULE, "led_class");
+   my_class = class_create(THIS_MODULE, "sqrt_class");
    if (my_class == NULL){
       printk(KERN_ERR "failed to create class\n");
       goto fail_0;
@@ -776,7 +641,9 @@ static int __init led_init(void)
    printk(KERN_INFO "cdev added\n");
    printk(KERN_INFO "Hello world\n");
 
-  return platform_driver_register(&led_driver);
+   init_waitqueue_head(&queue);
+
+  return platform_driver_register(&sqrt_driver);
 
    fail_2:
       device_destroy(my_class, my_dev_id);
@@ -787,9 +654,9 @@ static int __init led_init(void)
    return -1;
 }
 
-static void __exit led_exit(void)
+static void __exit sqrt_exit(void)
 {
-   platform_driver_unregister(&led_driver);
+   platform_driver_unregister(&sqrt_driver);
    cdev_del(my_cdev);
    device_destroy(my_class, my_dev_id);
    class_destroy(my_class);
@@ -798,5 +665,5 @@ static void __exit led_exit(void)
 }
 
 
-module_init(led_init);
-module_exit(led_exit);
+module_init(sqrt_init);
+module_exit(sqrt_exit);
